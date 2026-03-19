@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Top-Down Shooter (Web)</title>
+    <style>
+      :root {
+        --bg: #0f1720;
+        --panel: #172434;
+        --text: #e8f0ff;
+        --muted: #a7b3c8;
+        --player: #49d17d;
+        --enemy: #ff6b6b;
+        --bullet: #ffe16a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: "Trebuchet MS", "Noto Sans TC", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(1200px 500px at 30% -10%, #264161 0%, transparent 60%),
+          radial-gradient(1000px 500px at 100% 110%, #1c5f5a 0%, transparent 60%),
+          var(--bg);
+      }
+
+      .wrap {
+        width: min(95vw, 920px);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(1.2rem, 2vw, 1.8rem);
+        letter-spacing: 0.02em;
+      }
+
+      .hint {
+        margin: 0 0 12px;
+        color: var(--muted);
+      }
+
+      canvas {
+        width: 100%;
+        max-width: 900px;
+        aspect-ratio: 4 / 3;
+        display: block;
+        border: 2px solid #2f4661;
+        border-radius: 12px;
+        background: #111a26;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Top-Down Shooter 網頁版</h1>
+      <p class="hint">操作：← → 左右移動、Space 射擊、R 重開（Game Over 後）</p>
+      <canvas id="game" width="900" height="675"></canvas>
+    </main>
+
+    <script>
+      // -------------------------------
+      // 基本設定
+      // -------------------------------
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+
+      const WIDTH = canvas.width;
+      const HEIGHT = canvas.height;
+
+      const PLAYER_WIDTH = 56;
+      const PLAYER_HEIGHT = 20;
+      const PLAYER_Y = HEIGHT - 38;
+      const PLAYER_SPEED = 360;
+      const PLAYER_MAX_HP = 5;
+
+      const BULLET_RADIUS = 5;
+      const BULLET_SPEED = 480;
+      const BULLET_SCORE = 10;
+
+      const OBSTACLE_MIN_SIZE = 34;
+      const OBSTACLE_MAX_SIZE = 62;
+      const OBSTACLE_MIN_SPEED = 95;
+      const OBSTACLE_MAX_SPEED = 185;
+      const SPAWN_INTERVAL = 0.85;
+
+      const STATE_RUNNING = "RUNNING";
+      const STATE_GAME_OVER = "GAME_OVER";
+
+      // -------------------------------
+      // 小工具函式（保持簡單，初學者容易懂）
+      // -------------------------------
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function circlesCollide(a, b) {
+        return Math.hypot(a.x - b.x, a.y - b.y) <= a.r + b.r;
+      }
+
+      function obstacleRadius(obstacle) {
+        return obstacle.size * 0.5;
+      }
+
+      function spawnObstacle() {
+        const size = OBSTACLE_MIN_SIZE + Math.random() * (OBSTACLE_MAX_SIZE - OBSTACLE_MIN_SIZE);
+        const kinds = ["circle", "square", "diamond", "triangle"];
+        const kind = kinds[Math.floor(Math.random() * kinds.length)];
+        return {
+          x: size / 2 + Math.random() * (WIDTH - size),
+          y: -size,
+          size,
+          speed: OBSTACLE_MIN_SPEED + Math.random() * (OBSTACLE_MAX_SPEED - OBSTACLE_MIN_SPEED),
+          kind,
+        };
+      }
+
+      // -------------------------------
+      // 遊戲狀態
+      // -------------------------------
+      function createInitialState() {
+        return {
+          player: {
+            x: WIDTH / 2,
+            y: PLAYER_Y,
+            w: PLAYER_WIDTH,
+            h: PLAYER_HEIGHT,
+            hp: PLAYER_MAX_HP,
+          },
+          bullets: [],
+          obstacles: [],
+          score: 0,
+          state: STATE_RUNNING,
+          spawnTimer: 0,
+        };
+      }
+
+      let game = createInitialState();
+
+      // 這裡用 Set 記錄按鍵狀態，主迴圈每幀讀取。
+      const pressed = new Set();
+
+      window.addEventListener("keydown", (event) => {
+        pressed.add(event.code);
+
+        if (event.code === "Space" && game.state === STATE_RUNNING) {
+          game.bullets.push({
+            x: game.player.x,
+            y: game.player.y - game.player.h * 0.8,
+            dx: 0,
+            dy: -1,
+            r: BULLET_RADIUS,
+          });
+        }
+
+        if (event.code === "KeyR" && game.state === STATE_GAME_OVER) {
+          game = createInitialState();
+        }
+      });
+
+      window.addEventListener("keyup", (event) => {
+        pressed.delete(event.code);
+      });
+
+      // -------------------------------
+      // 邏輯更新
+      // -------------------------------
+      function playerHitRadius() {
+        return Math.max(game.player.w, game.player.h) * 0.48;
+      }
+
+      function update(dt) {
+        if (game.state === STATE_GAME_OVER) return;
+
+        // 1) 玩家只允許左右移動，固定在畫面底部。
+        let mx = 0;
+        if (pressed.has("ArrowLeft")) mx -= 1;
+        if (pressed.has("ArrowRight")) mx += 1;
+        game.player.x += mx * PLAYER_SPEED * dt;
+        game.player.x = clamp(game.player.x, game.player.w / 2, WIDTH - game.player.w / 2);
+        game.player.y = PLAYER_Y;
+
+        // 2) 子彈更新
+        for (const bullet of game.bullets) {
+          bullet.x += bullet.dx * BULLET_SPEED * dt;
+          bullet.y += bullet.dy * BULLET_SPEED * dt;
+        }
+        game.bullets = game.bullets.filter(
+          (b) => b.x >= -20 && b.x <= WIDTH + 20 && b.y >= -20 && b.y <= HEIGHT + 20
+        );
+
+        // 3) 障礙物由上往下掉落，尺寸較大且速度隨機。
+        game.spawnTimer += dt;
+        if (game.spawnTimer >= SPAWN_INTERVAL) {
+          game.obstacles.push(spawnObstacle());
+          game.spawnTimer = 0;
+        }
+
+        for (const obstacle of game.obstacles) {
+          obstacle.y += obstacle.speed * dt;
+        }
+
+        // 4) 碰撞檢查（兩階段：先收集，再套用）
+        const removeBullets = new Set();
+        const removeObstacles = new Set();
+        const bulletHitObstacle = new Set();
+        let playerHitCount = 0;
+
+        for (let bi = 0; bi < game.bullets.length; bi += 1) {
+          for (let oi = 0; oi < game.obstacles.length; oi += 1) {
+            const b = game.bullets[bi];
+            const o = game.obstacles[oi];
+            if (circlesCollide({ x: b.x, y: b.y, r: b.r }, { x: o.x, y: o.y, r: obstacleRadius(o) })) {
+              removeBullets.add(bi);
+              removeObstacles.add(oi);
+              bulletHitObstacle.add(oi);
+            }
+          }
+        }
+
+        for (let oi = 0; oi < game.obstacles.length; oi += 1) {
+          const o = game.obstacles[oi];
+          if (
+            circlesCollide(
+              { x: game.player.x, y: game.player.y, r: playerHitRadius() },
+              { x: o.x, y: o.y, r: obstacleRadius(o) }
+            )
+          ) {
+            removeObstacles.add(oi);
+            playerHitCount += 1;
+          }
+
+          // 障礙物落到底部也會造成傷害，增加緊張感。
+          if (o.y - obstacleRadius(o) > HEIGHT) {
+            removeObstacles.add(oi);
+            playerHitCount += 1;
+          }
+        }
+
+        if (bulletHitObstacle.size > 0) {
+          game.score += bulletHitObstacle.size * BULLET_SCORE;
+        }
+
+        game.bullets = game.bullets.filter((_, i) => !removeBullets.has(i));
+        game.obstacles = game.obstacles.filter((_, i) => !removeObstacles.has(i));
+
+        if (playerHitCount > 0) {
+          game.player.hp = Math.max(0, game.player.hp - playerHitCount);
+        }
+
+        if (game.player.hp <= 0) {
+          game.state = STATE_GAME_OVER;
+        }
+      }
+
+      // -------------------------------
+      // 畫面繪製
+      // -------------------------------
+      function draw() {
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+        ctx.fillStyle = "#111a26";
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+        // 玩家砲台：底部矩形 + 小砲管。
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--player");
+        ctx.fillRect(
+          game.player.x - game.player.w / 2,
+          game.player.y - game.player.h / 2,
+          game.player.w,
+          game.player.h
+        );
+        ctx.fillRect(game.player.x - 5, game.player.y - game.player.h / 2 - 12, 10, 12);
+
+        // 子彈
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--bullet");
+        for (const b of game.bullets) {
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // 障礙物：改成多種簡單幾何圖形，而不是只有圓點。
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--enemy");
+        for (const o of game.obstacles) {
+          const s = o.size;
+          const half = s / 2;
+
+          if (o.kind === "circle") {
+            ctx.beginPath();
+            ctx.arc(o.x, o.y, half, 0, Math.PI * 2);
+            ctx.fill();
+          } else if (o.kind === "square") {
+            ctx.fillRect(o.x - half, o.y - half, s, s);
+          } else if (o.kind === "diamond") {
+            ctx.beginPath();
+            ctx.moveTo(o.x, o.y - half);
+            ctx.lineTo(o.x + half, o.y);
+            ctx.lineTo(o.x, o.y + half);
+            ctx.lineTo(o.x - half, o.y);
+            ctx.closePath();
+            ctx.fill();
+          } else {
+            ctx.beginPath();
+            ctx.moveTo(o.x, o.y - half);
+            ctx.lineTo(o.x + half, o.y + half);
+            ctx.lineTo(o.x - half, o.y + half);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+
+        // HUD
+        ctx.fillStyle = "#eef4ff";
+        ctx.font = "22px 'Trebuchet MS', sans-serif";
+        ctx.fillText(`Score: ${game.score}   Health: ${game.player.hp}`, 14, 30);
+
+        if (game.state === STATE_GAME_OVER) {
+          ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+          ctx.fillRect(0, 0, WIDTH, HEIGHT);
+          ctx.fillStyle = "#ffd6d6";
+          ctx.font = "bold 38px 'Trebuchet MS', sans-serif";
+          ctx.fillText("GAME OVER", WIDTH / 2 - 120, HEIGHT / 2 - 10);
+          ctx.font = "22px 'Trebuchet MS', sans-serif";
+          ctx.fillStyle = "#ffffff";
+          ctx.fillText("Press R to Restart", WIDTH / 2 - 95, HEIGHT / 2 + 30);
+        }
+      }
+
+      // -------------------------------
+      // 主迴圈
+      // -------------------------------
+      let lastTime = performance.now();
+      function gameLoop(now) {
+        // 限制每幀最大 dt，避免切回視窗時角色瞬移。
+        const dt = Math.min((now - lastTime) / 1000, 0.033);
+        lastTime = now;
+
+        update(dt);
+        draw();
+        requestAnimationFrame(gameLoop);
+      }
+
+      requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
